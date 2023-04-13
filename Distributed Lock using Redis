@@ -1,0 +1,90 @@
+package main
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/gomodule/redigo/redis"
+)
+
+type RedisDistributedLock struct {
+	pool     *redis.Pool
+	lockKey  string
+	timeout  int
+	isLocked bool
+}
+
+func NewRedisDistributedLock(pool *redis.Pool, lockKey string, timeout int) *RedisDistributedLock {
+	return &RedisDistributedLock{
+		pool:     pool,
+		lockKey:  lockKey,
+		timeout:  timeout,
+		isLocked: false,
+	}
+}
+
+func (rdl *RedisDistributedLock) Acquire() error {
+	conn := rdl.pool.Get()
+	defer conn.Close()
+
+	for {
+		expires := time.Now().Unix() + int64(rdl.timeout)
+		result, err := redis.String(conn.Do("SET", rdl.lockKey, expires, "NX", "EX", rdl.timeout))
+		if err == nil && result == "OK" {
+			rdl.isLocked = true
+			return nil
+		}
+
+		if ttl, err := redis.Int64(conn.Do("TTL", rdl.lockKey)); err == nil && ttl == -1 {
+			conn.Do("EXPIRE", rdl.lockKey, rdl.timeout)
+		}
+
+		time.Sleep(time.Millisecond * 100)
+	}
+}
+
+func (rdl *RedisDistributedLock) Release() error {
+	if !rdl.isLocked {
+		return fmt.Errorf("lock not acquired")
+	}
+
+	conn := rdl.pool.Get()
+	defer conn.Close()
+
+	conn.Send("WATCH", rdl.lockKey)
+	currentValue, err := redis.Int64(conn.Do("GET", rdl.lockKey))
+	if err != nil {
+		return err
+	}
+
+	if currentValue == time.Now().Unix()+int64(rdl.timeout) {
+		conn.Send("MULTI")
+		conn.Send("DEL", rdl.lockKey)
+		if _, err := conn.Do("EXEC"); err != nil {
+			return err
+		}
+	}
+
+	rdl.isLocked = false
+	return nil
+}
+
+/*
+
+In this implementation, we use the github.com/gomodule/redigo/redis package to interact with Redis. 
+The NewRedisDistributedLock function initializes a new instance of the RedisDistributedLock struct 
+with the provided Redis connection pool, lock key, and timeout. The Acquire method attempts to acquire 
+the lock by setting the value of the lock key to the current time plus the lock timeout, using the SETNX c
+ommand to ensure that the key is only set if it does not already exist. If the lock is successfully 
+acquired, the isLocked flag is set to true and the method returns nil. If the lock cannot be acquired, 
+the method waits for a short time before trying again.
+
+The Release method releases the lock by first checking that it was acquired (to prevent accidental 
+unlocking of a lock held by another process), then using Redis transactions to check that the value 
+of the lock key is still the same as the one set by the Acquire method, and deleting the key if it is. 
+Finally, the isLocked flag is set to false and the method returns nil.
+
+Note that this implementation does not handle cases where the Redis server is unavailable or unreachable. 
+It is recommended to include error handling and retry logic to handle such scenarios in a production implementation.
+
+*/
