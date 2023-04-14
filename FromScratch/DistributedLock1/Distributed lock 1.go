@@ -1,4 +1,4 @@
-package FromScratch
+package DistributedLock1
 
 import (
 	"context"
