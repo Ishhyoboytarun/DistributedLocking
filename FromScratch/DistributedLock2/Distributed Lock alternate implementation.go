@@ -1,4 +1,4 @@
-package FromScratch
+package DistributedLock2
 
 import (
 	"fmt"
